@@ -723,6 +723,123 @@ else:
     st.info("Load some Claude Code sessions first.")
 
 # ---------------------------------------------------------------------------
+# Session-Level Cost Breakdown per Project
+# ---------------------------------------------------------------------------
+
+st.markdown('<div class="section-header">Session Cost Breakdown by Project</div>', unsafe_allow_html=True)
+
+if has_usage and not df_filtered.empty:
+    session_agg = (
+        df_filtered[df_filtered["source"] == "main"]
+        .groupby(["project_name", "sessionId"])
+        .agg(
+            total_tokens=("total_tokens", "sum"),
+            input_tokens=("input_tokens", "sum"),
+            output_tokens=("output_tokens", "sum"),
+            cache_tokens=("cache_creation_tokens", "sum"),
+            cost_usd=("cost_usd", "sum"),
+            tool_calls=("tool_use_count", "sum"),
+            model=("model", "first"),
+            date=("timestamp", "min"),
+        )
+        .reset_index()
+    )
+    session_agg["date"] = pd.to_datetime(session_agg["date"], utc=True).dt.strftime("%Y-%m-%d")
+    session_agg["session_short"] = session_agg["sessionId"].str[:8]
+
+    # Top 12 projects by total cost
+    top_projects = (
+        session_agg.groupby("project_name")["cost_usd"]
+        .sum()
+        .sort_values(ascending=False)
+        .head(12)
+        .index.tolist()
+    )
+    chart_df = session_agg[session_agg["project_name"].isin(top_projects)].copy()
+
+    # Stacked bar: one bar per project, each segment = one session
+    fig_sess = go.Figure()
+    colors = [
+        "#407E3C","#5a9e56","#94c990","#c3ddbf","#2d6e28","#6BAF67",
+        "#1a3d19","#d4edda","#163A17","#7DBF7E","#0A1F0A","#a8d5a2",
+    ]
+    proj_session_map = chart_df.groupby("project_name")
+    for i, proj in enumerate(top_projects):
+        if proj not in proj_session_map.groups:
+            continue
+        proj_data = proj_session_map.get_group(proj).sort_values("cost_usd", ascending=False)
+        for _, row in proj_data.iterrows():
+            fig_sess.add_trace(go.Bar(
+                name=f"{proj} · {row['session_short']}",
+                y=[proj],
+                x=[row["cost_usd"]],
+                orientation="h",
+                marker_color=colors[i % len(colors)],
+                hovertemplate=(
+                    f"<b>{proj}</b><br>"
+                    f"Session: {row['sessionId'][:16]}…<br>"
+                    f"Date: {row['date']}<br>"
+                    f"Tokens: {row['total_tokens']:,}<br>"
+                    f"Cost: ${row['cost_usd']:.4f}<br>"
+                    f"Tool calls: {int(row['tool_calls'])}<extra></extra>"
+                ),
+                showlegend=False,
+            ))
+
+    fig_sess.update_layout(
+        barmode="stack",
+        margin=dict(l=0, r=0, t=8, b=0),
+        height=max(280, len(top_projects) * 36),
+        plot_bgcolor=PLOT_BG,
+        paper_bgcolor=BG,
+        font=dict(family="Poppins", color=TEXT),
+        xaxis=dict(gridcolor=GRID, color=TEXT, title="Cost (USD)"),
+        yaxis=dict(color=TEXT, autorange="reversed"),
+    )
+    st.plotly_chart(fig_sess, use_container_width=True,
+                    config={"displayModeBar": True, "displaylogo": False,
+                            "modeBarButtonsToRemove": ["sendDataToCloud"]})
+
+    # Drilldown table
+    st.markdown(f"<p style='color:{TEXT_MUTED};font-size:0.8rem;margin:0 0 8px;'>Click column headers to sort · Hover bars for session detail</p>", unsafe_allow_html=True)
+
+    table_df = session_agg.copy()
+    table_df = table_df.sort_values("cost_usd", ascending=False)
+    table_df["cost_usd_fmt"] = table_df["cost_usd"].apply(format_cost)
+    table_df["model_short"] = table_df["model"].str.replace("claude-", "").str.replace("-", " ").str.title()
+
+    display_sess = table_df[[
+        "project_name", "date", "session_short", "model_short",
+        "total_tokens", "input_tokens", "output_tokens",
+        "cache_tokens", "tool_calls", "cost_usd",
+    ]].copy()
+    display_sess.columns = [
+        "Project", "Date", "Session", "Model",
+        "Total Tokens", "Input", "Output",
+        "Cache Create", "Tool Calls", "Cost (USD)",
+    ]
+
+    st.dataframe(
+        display_sess,
+        use_container_width=True,
+        height=360,
+        column_config={
+            "Project":      st.column_config.TextColumn(width="medium"),
+            "Session":      st.column_config.TextColumn(width="small"),
+            "Model":        st.column_config.TextColumn(width="small"),
+            "Total Tokens": st.column_config.NumberColumn(format="%d"),
+            "Input":        st.column_config.NumberColumn(format="%d"),
+            "Output":       st.column_config.NumberColumn(format="%d"),
+            "Cache Create": st.column_config.NumberColumn(format="%d"),
+            "Tool Calls":   st.column_config.NumberColumn(format="%d"),
+            "Cost (USD)":   st.column_config.NumberColumn(format="$%.4f"),
+        },
+    )
+    st.caption(f"{len(session_agg):,} total sessions · sorted by cost descending")
+else:
+    st.info("No session data available.")
+
+# ---------------------------------------------------------------------------
 # Prompt Log Table
 # ---------------------------------------------------------------------------
 
