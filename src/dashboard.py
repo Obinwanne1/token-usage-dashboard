@@ -776,6 +776,111 @@ else:
 # Session-Level Cost Breakdown per Project
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Usage Stats (mirrors Claude Code /usage panel)
+# ---------------------------------------------------------------------------
+
+st.markdown('<div class="section-header">Usage Stats</div>', unsafe_allow_html=True)
+st.caption("Computed from local JSONL data · Set your own budgets below to track limits")
+
+from datetime import date as _date, timedelta as _td
+import math as _math
+
+_today = _date.today()
+_week_start = _today - _td(days=_today.weekday())  # Monday
+_next_monday = _week_start + _td(days=7)
+
+# All-time df (not filtered) for usage stats — we want real totals
+_all_usage = df_usage[df_usage["source"] == "main"].copy() if has_usage else pd.DataFrame()
+
+# Current session — most recent sessionId by timestamp
+_cur_session_tokens = 0
+_cur_session_cost = 0.0
+_cur_session_id = "—"
+if has_usage and not _all_usage.empty and "timestamp" in _all_usage.columns:
+    _latest_ts = _all_usage["timestamp"].max()
+    if pd.notna(_latest_ts):
+        _cur_sid = _all_usage.loc[_all_usage["timestamp"] == _latest_ts, "sessionId"].iloc[0]
+        _cur_sess_df = _all_usage[_all_usage["sessionId"] == _cur_sid]
+        _cur_session_tokens = int(_cur_sess_df["total_tokens"].sum())
+        _cur_session_cost = _cur_sess_df["cost_usd"].sum()
+        _cur_session_id = _cur_sid[:8]
+
+# This week
+_this_week_df = _all_usage[_all_usage["date"] >= _week_start] if has_usage and "date" in _all_usage.columns else pd.DataFrame()
+_week_tokens = int(_this_week_df["total_tokens"].sum()) if not _this_week_df.empty else 0
+_week_cost = _this_week_df["cost_usd"].sum() if not _this_week_df.empty else 0.0
+
+# Today
+_today_df = _all_usage[_all_usage["date"] == _today] if has_usage and "date" in _all_usage.columns else pd.DataFrame()
+_today_tokens = int(_today_df["total_tokens"].sum()) if not _today_df.empty else 0
+_today_cost = _today_df["cost_usd"].sum() if not _today_df.empty else 0.0
+
+# Budget inputs (persisted in session_state)
+with st.expander("⚙️ Set Usage Budgets", expanded=False):
+    _b1, _b2, _b3 = st.columns(3)
+    with _b1:
+        session_token_budget = st.number_input(
+            "Session token budget", min_value=1000, max_value=2_000_000,
+            value=int(st.session_state.get("session_token_budget", 200_000)),
+            step=10_000, format="%d", key="session_token_budget",
+            help="Max tokens per session (claude-sonnet context window = 200K)"
+        )
+    with _b2:
+        weekly_token_budget = st.number_input(
+            "Weekly token budget", min_value=100_000, max_value=500_000_000,
+            value=int(st.session_state.get("weekly_token_budget", 5_000_000)),
+            step=500_000, format="%d", key="weekly_token_budget",
+        )
+    with _b3:
+        daily_token_budget = st.number_input(
+            "Daily token budget", min_value=10_000, max_value=50_000_000,
+            value=int(st.session_state.get("daily_token_budget", 1_000_000)),
+            step=100_000, format="%d", key="daily_token_budget",
+        )
+
+def _pbar(used: int, total: int, label: str, sublabel: str) -> str:
+    pct = min(used / total * 100, 100) if total > 0 else 0
+    color = "#dc2626" if pct >= 90 else "#f59e0b" if pct >= 70 else PRIMARY
+    return f"""
+    <div style="margin-bottom:16px;">
+      <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+        <span style="font-weight:600;color:{TEXT};font-size:0.85rem;">{label}</span>
+        <span style="color:{TEXT_MUTED};font-size:0.8rem;">{pct:.1f}% used</span>
+      </div>
+      <div style="background:{BORDER};border-radius:6px;height:10px;overflow:hidden;">
+        <div style="background:{color};width:{pct:.1f}%;height:100%;border-radius:6px;
+             transition:width 0.4s ease;"></div>
+      </div>
+      <div style="color:{TEXT_MUTED};font-size:0.75rem;margin-top:3px;">{sublabel}</div>
+    </div>"""
+
+_u1, _u2, _u3 = st.columns(3)
+with _u1:
+    st.markdown(_pbar(
+        _cur_session_tokens, session_token_budget,
+        f"Current Session · {_cur_session_id}",
+        f"{_cur_session_tokens:,} / {session_token_budget:,} tokens · {format_cost(_cur_session_cost)}"
+    ), unsafe_allow_html=True)
+with _u2:
+    st.markdown(_pbar(
+        _week_tokens, weekly_token_budget,
+        "Current Week (all models)",
+        f"{_week_tokens:,} / {weekly_token_budget:,} tokens · {format_cost(_week_cost)} · resets {_next_monday.strftime('%b %d')}"
+    ), unsafe_allow_html=True)
+with _u3:
+    st.markdown(_pbar(
+        _today_tokens, daily_token_budget,
+        "Today",
+        f"{_today_tokens:,} / {daily_token_budget:,} tokens · {format_cost(_today_cost)}"
+    ), unsafe_allow_html=True)
+
+st.caption("🔒 Exact Claude.ai rate-limit % requires a private API — set your own budgets above to track limits")
+
+# ---------------------------------------------------------------------------
+# Session Cost Breakdown by Project
+# ---------------------------------------------------------------------------
+
 st.markdown('<div class="section-header">Session Cost Breakdown by Project</div>', unsafe_allow_html=True)
 
 if has_usage and not df_filtered.empty:
