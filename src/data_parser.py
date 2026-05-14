@@ -11,8 +11,11 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from dotenv import load_dotenv
 
 from pricing import calculate_cost
+
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -21,7 +24,10 @@ from pricing import calculate_cost
 def get_claude_base_dir() -> Path:
     override = os.getenv("CLAUDE_DATA_DIR", "").strip()
     if override:
-        return Path(override)
+        p = Path(override).resolve()
+        if not p.is_dir():
+            raise ValueError(f"CLAUDE_DATA_DIR is not a valid directory: {p}")
+        return p
     return Path.home() / ".claude"
 
 
@@ -96,7 +102,7 @@ def load_history() -> list[dict]:
     results: list[dict] = []
     if not history_file.exists():
         return results
-    with history_file.open(encoding="utf-8", errors="replace") as fh:
+    with history_file.open(encoding="utf-8", errors="ignore") as fh:
         for line in fh:
             line = line.strip()
             if not line:
@@ -194,7 +200,7 @@ def _parse_session_jsonl(
     results: list[dict],
     source: str = "main",
 ) -> None:
-    with path.open(encoding="utf-8", errors="replace") as fh:
+    with path.open(encoding="utf-8", errors="ignore") as fh:
         for line in fh:
             line = line.strip()
             if not line:

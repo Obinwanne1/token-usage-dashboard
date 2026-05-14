@@ -2,10 +2,17 @@
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+*.log
+*.db
 .pytest_cache/
 .streamlit/
+.streamlit/secrets.toml
 *.egg-info/
 dist/
 build/
 .venv/
 venv/
+htmlcov/
+.coverage
+

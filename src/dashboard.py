@@ -2,21 +2,26 @@
 
 from __future__ import annotations
 
+import html
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import date as _date, datetime, timedelta as _td, timezone
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from dotenv import load_dotenv
 from streamlit_autorefresh import st_autorefresh
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 from data_parser import load_data_cached
-from pricing import format_cost
+from pricing import PRICING, calculate_cost as _calc_cost, format_cost
+
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -351,8 +356,12 @@ st_autorefresh(interval=30_000, key="data_refresh")
 # Load data
 # ---------------------------------------------------------------------------
 
-with st.spinner("Loading token data..."):
-    data = load_data_cached()
+try:
+    with st.spinner("Loading token data..."):
+        data = load_data_cached()
+except Exception as _load_err:
+    st.error(f"Failed to load Claude data: {_load_err}")
+    st.stop()
 
 df_usage: pd.DataFrame = data["df_usage"]
 df_history: pd.DataFrame = data["df_history"]
@@ -379,8 +388,8 @@ date_range        = st.session_state.get("date_filter_exp",   None)
 # Apply filters
 # ---------------------------------------------------------------------------
 
-df_filtered = df_usage[df_usage["source"] != "tool_result"].copy() if has_usage else df_usage.copy()
-df_hist_filtered = df_history.copy()
+df_filtered = df_usage[df_usage["source"] != "tool_result"] if has_usage else df_usage
+df_hist_filtered = df_history
 
 if selected_projects and has_usage:
     df_filtered = df_filtered[df_filtered["project_name"].isin(selected_projects)]
@@ -431,13 +440,10 @@ st.markdown("---")
 with st.expander("☰  Filters & Display", expanded=False):
     _fc1, _fc2, _fc3, _fc4 = st.columns(4)
     with _fc1:
-        _all_proj = sorted(df_usage["project_name"].unique().tolist()) if has_usage else []
         selected_projects = st.multiselect("Projects", _all_proj, default=_all_proj, key="proj_filter_exp")
     with _fc2:
-        _all_types = sorted(df_history["prompt_type"].unique().tolist()) if has_history else []
         selected_types = st.multiselect("Prompt Types", _all_types, default=_all_types, key="type_filter_exp")
     with _fc3:
-        _all_models = sorted([m for m in df_usage["model"].unique().tolist() if m != "tool_result"]) if has_usage else []
         selected_models = st.multiselect("Models", _all_models, default=_all_models, key="model_filter_exp")
     with _fc4:
         if has_usage and "date" in df_usage.columns:
@@ -467,7 +473,6 @@ with st.expander("☰  Filters & Display", expanded=False):
 # ---------------------------------------------------------------------------
 
 if has_usage and "date" in df_filtered.columns:
-    from datetime import date as _date
     _today = _date.today()
     _today_df = df_filtered[df_filtered["date"] == _today]
     _today_cost = _today_df["cost_usd"].sum()
@@ -577,8 +582,6 @@ _sf_col, _ms_col = st.columns([3, 2])
 with _sf_col:
     st.markdown('<div class="section-header">Spend Forecast</div>', unsafe_allow_html=True)
     if has_usage and "date" in df_filtered.columns and not df_filtered.empty:
-        import numpy as np
-
         _daily_cost = (
             df_filtered.groupby("date")["cost_usd"].sum().reset_index()
         )
@@ -647,27 +650,23 @@ with _sf_col:
 with _ms_col:
     st.markdown('<div class="section-header">Model Cost Simulator</div>', unsafe_allow_html=True)
     if has_usage and not df_filtered.empty:
-        from pricing import PRICING, calculate_cost as _calc_cost
-
         _sim_model = st.selectbox(
             "Simulate with model",
             options=list(PRICING.keys()),
             index=list(PRICING.keys()).index("claude-haiku-4-5"),
             key="sim_model",
         )
-        # Recalculate cost using simulated model for all rows
-        _sim_cost = df_filtered.apply(
-            lambda row: _calc_cost(
-                {
-                    "input_tokens": row["input_tokens"],
-                    "output_tokens": row["output_tokens"],
-                    "cache_creation_input_tokens": row.get("cache_creation_tokens", 0),
-                    "cache_read_input_tokens": row.get("cache_read_tokens", 0),
-                },
-                _sim_model,
-            ),
-            axis=1,
-        ).sum()
+        # Vectorized cost recalculation — no row-by-row apply()
+        _rates = PRICING.get(_sim_model) or next(
+            (v for k, v in PRICING.items() if _sim_model.startswith(k)),
+            {"input": 3.00, "output": 15.00, "cache_read": 0.30, "cache_create": 3.75},
+        )
+        _sim_cost = float((
+            df_filtered["input_tokens"]            * _rates["input"]        / 1_000_000
+            + df_filtered["output_tokens"]         * _rates["output"]       / 1_000_000
+            + df_filtered["cache_creation_tokens"] * _rates["cache_create"] / 1_000_000
+            + df_filtered["cache_read_tokens"]     * _rates["cache_read"]   / 1_000_000
+        ).sum())
         _actual_cost = df_filtered["cost_usd"].sum()
         _diff = _sim_cost - _actual_cost
         _diff_pct = (_diff / _actual_cost * 100) if _actual_cost > 0 else 0
@@ -766,12 +765,20 @@ if has_usage and "date" in df_filtered.columns and not df_filtered.empty:
     _heat_daily["date_str"] = _heat_daily["date"].dt.strftime("%Y-%m-%d")
 
     _n_weeks = int(_heat_daily["week_idx"].max()) + 1
-    _heat_z   = [[None] * _n_weeks for _ in range(7)]
-    _heat_txt = [[""] * _n_weeks for _ in range(7)]
-    for _, r in _heat_daily.iterrows():
-        d, w = int(r["dow"]), int(r["week_idx"])
-        _heat_z[d][w] = int(r["total_tokens"])
-        _heat_txt[d][w] = f"{r['date_str']}<br>{int(r['total_tokens']):,} tokens"
+    _heat_daily["_text"] = (
+        _heat_daily["date_str"] + "<br>"
+        + _heat_daily["total_tokens"].map(lambda x: f"{int(x):,} tokens")
+    )
+    _pivot_z = (
+        _heat_daily.pivot(index="dow", columns="week_idx", values="total_tokens")
+        .reindex(index=range(7), columns=range(_n_weeks))
+    )
+    _pivot_txt = (
+        _heat_daily.pivot(index="dow", columns="week_idx", values="_text")
+        .reindex(index=range(7), columns=range(_n_weeks), fill_value="")
+    )
+    _heat_z   = [[None if pd.isna(v) else int(v) for v in row] for row in _pivot_z.values.tolist()]
+    _heat_txt = _pivot_txt.fillna("").values.tolist()
 
     _day_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     fig_heat = go.Figure(go.Heatmap(
@@ -1020,8 +1027,6 @@ else:
 st.markdown('<div class="section-header">Usage Stats</div>', unsafe_allow_html=True)
 st.caption("Computed from local JSONL data · Budgets auto-scaled from your historical peak usage")
 
-from datetime import date as _date, timedelta as _td
-
 _today = _date.today()
 _week_start = _today - _td(days=_today.weekday())  # Monday
 _last_week_start = _week_start - _td(days=7)
@@ -1035,6 +1040,7 @@ _all_usage = df_usage[df_usage["source"] == "main"].copy() if has_usage else pd.
 _cur_session_tokens = 0
 _cur_session_cost = 0
 _cur_session_id = "—"
+_cur_sid = ""  # BUG-1: initialize before conditional so line 1147 ref is always defined
 if has_usage and not _all_usage.empty and "timestamp" in _all_usage.columns:
     _latest_ts = _all_usage["timestamp"].max()
     if pd.notna(_latest_ts):
@@ -1066,8 +1072,8 @@ if has_usage and not _all_usage.empty and _has_date:
     _hist_sess_max   = int(_all_usage.groupby("sessionId")["total_tokens"].sum().max())
     _hist_daily_max  = int(_all_usage.groupby("date")["total_tokens"].sum().max())
     _hist_weekly_max = int(
-        _all_usage.set_index("timestamp")
-        .resample("W")["total_tokens"].sum().max()
+        _all_usage.groupby(pd.Grouper(key="timestamp", freq="W"))["total_tokens"]
+        .sum().max()
     )
 else:
     _hist_sess_max, _hist_daily_max, _hist_weekly_max = 200_000, 1_000_000, 5_000_000
@@ -1231,7 +1237,7 @@ if has_usage and not df_filtered.empty:
             f'<div style="display:flex;justify-content:space-between;align-items:center;'
             f'padding:6px 0;border-bottom:1px solid {BORDER};">'
             f'<span style="color:{TEXT};font-size:0.82rem;">'
-            f'🔴 <strong>{r["project_name"]}</strong> · {r["session_short"]}</span>'
+            f'🔴 <strong>{html.escape(r["project_name"])}</strong> · {html.escape(r["session_short"])}</span>'
             f'<span style="color:#dc2626;font-size:0.82rem;font-weight:600;">'
             f'{format_cost(r["cost_usd"])} &nbsp;'
             f'<span style="color:{TEXT_MUTED};font-weight:400;">({r["cost_usd"]/_proj_avg[r.name]:.1f}× avg)</span>'
@@ -1282,7 +1288,7 @@ if has_usage and not df_filtered.empty:
                 orientation="h",
                 marker_color=color,
                 hovertemplate=(
-                    f"<b>{proj}</b><br>"
+                    f"<b>{html.escape(proj)}</b><br>"
                     f"Session: {row['sessionId'][:16]}…<br>"
                     f"Date: {row['date']}<br>"
                     f"Tokens: {int(row['total_tokens']):,}<br>"
@@ -1300,7 +1306,7 @@ if has_usage and not df_filtered.empty:
                 marker_color=color,
                 opacity=0.45,
                 hovertemplate=(
-                    f"<b>{proj}</b><br>"
+                    f"<b>{html.escape(proj)}</b><br>"
                     f"Other sessions: {len(rest)}<br>"
                     f"Combined cost: ${rest['cost_usd'].sum():.4f}<br>"
                     f"Combined tokens: {int(rest['total_tokens'].sum()):,}<extra></extra>"
@@ -1393,11 +1399,14 @@ if has_usage and not df_filtered.empty:
                 "Total Cost (USD)":   st.column_config.NumberColumn(format="$%.4f"),
             },
         )
-        st.caption(
-            f"{len(proj_grouped):,} projects · "
-            f"most expensive: {proj_grouped.iloc[0]['project_name']} "
-            f"({format_cost(proj_grouped.iloc[0]['cost_usd'])})"
-        )
+        if not proj_grouped.empty:
+            st.caption(
+                f"{len(proj_grouped):,} projects · "
+                f"most expensive: {html.escape(proj_grouped.iloc[0]['project_name'])} "
+                f"({format_cost(proj_grouped.iloc[0]['cost_usd'])})"
+            )
+        else:
+            st.caption(f"{len(proj_grouped):,} projects")
 
     else:
         # Original per-session table
