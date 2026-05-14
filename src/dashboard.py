@@ -569,6 +569,131 @@ with k5:
 st.markdown("<br>", unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
+# Spend Forecast + Model Cost Simulator
+# ---------------------------------------------------------------------------
+
+_sf_col, _ms_col = st.columns([3, 2])
+
+with _sf_col:
+    st.markdown('<div class="section-header">Spend Forecast</div>', unsafe_allow_html=True)
+    if has_usage and "date" in df_filtered.columns and not df_filtered.empty:
+        import numpy as np
+
+        _daily_cost = (
+            df_filtered.groupby("date")["cost_usd"].sum().reset_index()
+        )
+        _daily_cost["date"] = pd.to_datetime(_daily_cost["date"])
+        _daily_cost = _daily_cost.sort_values("date")
+
+        if len(_daily_cost) >= 3:
+            _x = np.arange(len(_daily_cost), dtype=float)
+            _y = _daily_cost["cost_usd"].values.astype(float)
+            _coeffs = np.polyfit(_x, _y, 1)
+            _slope, _intercept = float(_coeffs[0]), float(_coeffs[1])
+            _y_pred = _slope * _x + _intercept
+            _ss_res = float(np.sum((_y - _y_pred) ** 2))
+            _ss_tot = float(np.sum((_y - _y.mean()) ** 2))
+            _r = float(np.sqrt(1 - _ss_res / _ss_tot)) if _ss_tot > 0 else 0.0
+
+            _today_dt = pd.Timestamp.today().normalize()
+            _last_date = _daily_cost["date"].max()
+            _days_since_last = (_today_dt - _last_date).days
+            _days_to_sunday = (6 - _today_dt.weekday()) % 7 or 7
+            _days_to_month_end = (
+                (_today_dt.replace(day=1) + pd.offsets.MonthEnd(1)) - _today_dt
+            ).days
+
+            def _proj(n_days: int) -> float:
+                future_x = len(_daily_cost) + _days_since_last + n_days
+                return max(0.0, _intercept + _slope * future_x)
+
+            _eow_cost = sum(_proj(d) for d in range(_days_to_sunday + 1))
+            _eom_cost = sum(_proj(d) for d in range(_days_to_month_end + 1))
+            _avg_daily = float(_y.mean())
+            _trend_icon = "📈" if _slope > 0.01 else "📉" if _slope < -0.01 else "➡️"
+
+            st.markdown(
+                f"""<div style="background:{SURFACE};border:1px solid {BORDER};
+                border-left:4px solid {PRIMARY};border-radius:8px;padding:14px 18px;">
+                <div style="display:flex;gap:24px;flex-wrap:wrap;">
+                  <div>
+                    <div style="color:{TEXT_MUTED};font-size:0.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.05em;">Avg/Day</div>
+                    <div style="color:{TEXT};font-size:1.2rem;font-weight:700;">{format_cost(_avg_daily)}</div>
+                  </div>
+                  <div>
+                    <div style="color:{TEXT_MUTED};font-size:0.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.05em;">By Sunday</div>
+                    <div style="color:{TEXT};font-size:1.2rem;font-weight:700;">{format_cost(_eow_cost)}</div>
+                  </div>
+                  <div>
+                    <div style="color:{TEXT_MUTED};font-size:0.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.05em;">By Month End</div>
+                    <div style="color:{TEXT};font-size:1.2rem;font-weight:700;">{format_cost(_eom_cost)}</div>
+                  </div>
+                  <div>
+                    <div style="color:{TEXT_MUTED};font-size:0.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.05em;">Trend</div>
+                    <div style="color:{TEXT};font-size:1.2rem;font-weight:700;">{_trend_icon} {"+" if _slope > 0 else ""}{format_cost(_slope)}/day</div>
+                  </div>
+                </div>
+                <div style="color:{TEXT_MUTED};font-size:0.72rem;margin-top:8px;">
+                  Linear regression · R²={_r**2:.2f} · {len(_daily_cost)} days of data
+                </div></div>""",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.info("Need ≥ 3 days of data for forecast.")
+    else:
+        st.info("No usage data.")
+
+with _ms_col:
+    st.markdown('<div class="section-header">Model Cost Simulator</div>', unsafe_allow_html=True)
+    if has_usage and not df_filtered.empty:
+        from pricing import PRICING, calculate_cost as _calc_cost
+
+        _sim_model = st.selectbox(
+            "Simulate with model",
+            options=list(PRICING.keys()),
+            index=list(PRICING.keys()).index("claude-haiku-4-5"),
+            key="sim_model",
+        )
+        # Recalculate cost using simulated model for all rows
+        _sim_cost = df_filtered.apply(
+            lambda row: _calc_cost(
+                {
+                    "input_tokens": row["input_tokens"],
+                    "output_tokens": row["output_tokens"],
+                    "cache_creation_input_tokens": row.get("cache_creation_tokens", 0),
+                    "cache_read_input_tokens": row.get("cache_read_tokens", 0),
+                },
+                _sim_model,
+            ),
+            axis=1,
+        ).sum()
+        _actual_cost = df_filtered["cost_usd"].sum()
+        _diff = _sim_cost - _actual_cost
+        _diff_pct = (_diff / _actual_cost * 100) if _actual_cost > 0 else 0
+        _diff_color = "#dc2626" if _diff > 0 else "#16A34A"
+        _arrow = "▲" if _diff > 0 else "▼"
+        _sim_label = _sim_model.replace("claude-", "").replace("-", " ").title()
+
+        st.markdown(
+            f"""<div style="background:{SURFACE};border:1px solid {BORDER};
+            border-left:4px solid {'#16A34A' if _diff < 0 else '#f59e0b'};
+            border-radius:8px;padding:14px 18px;">
+            <div style="color:{TEXT_MUTED};font-size:0.75rem;margin-bottom:6px;">
+              If you used <strong style="color:{TEXT};">{_sim_label}</strong> instead:
+            </div>
+            <div style="font-size:1.6rem;font-weight:700;color:{TEXT};">{format_cost(_sim_cost)}</div>
+            <div style="color:{_diff_color};font-size:0.85rem;font-weight:600;margin-top:4px;">
+              {_arrow} {format_cost(abs(_diff))} ({abs(_diff_pct):.1f}%)
+              {"more" if _diff > 0 else "saved"} vs actual {format_cost(_actual_cost)}
+            </div></div>""",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info("No usage data.")
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------------
 # Token Trend
 # ---------------------------------------------------------------------------
 
@@ -1096,6 +1221,32 @@ if has_usage and not df_filtered.empty:
     session_agg["date"] = pd.to_datetime(session_agg["date"], utc=True).dt.strftime("%Y-%m-%d")
     session_agg["session_short"] = session_agg["sessionId"].str[:8]
 
+    # Anomaly detection — flag sessions > 2× their project average cost
+    _proj_avg = session_agg.groupby("project_name")["cost_usd"].transform("mean")
+    session_agg["is_anomaly"] = session_agg["cost_usd"] > (_proj_avg * 2)
+    _anomalies = session_agg[session_agg["is_anomaly"]].sort_values("cost_usd", ascending=False)
+    if not _anomalies.empty:
+        _anom_items = "".join([
+            f'<div style="display:flex;justify-content:space-between;align-items:center;'
+            f'padding:6px 0;border-bottom:1px solid {BORDER};">'
+            f'<span style="color:{TEXT};font-size:0.82rem;">'
+            f'🔴 <strong>{r["project_name"]}</strong> · {r["session_short"]}</span>'
+            f'<span style="color:#dc2626;font-size:0.82rem;font-weight:600;">'
+            f'{format_cost(r["cost_usd"])} &nbsp;'
+            f'<span style="color:{TEXT_MUTED};font-weight:400;">({r["cost_usd"]/_proj_avg[r.name]:.1f}× avg)</span>'
+            f'</span></div>'
+            for _, r in _anomalies.head(5).iterrows()
+        ])
+        st.markdown(
+            f'<div style="background:{"#1a0a0a" if dark else "#fff5f5"};border:1px solid #dc2626;'
+            f'border-left:4px solid #dc2626;border-radius:8px;padding:12px 16px;margin-bottom:12px;">'
+            f'<div style="font-weight:600;color:#dc2626;font-size:0.85rem;margin-bottom:8px;">'
+            f'⚠️ {len(_anomalies)} Anomalous Session{"s" if len(_anomalies)>1 else ""} '
+            f'— spending 2× or more above project average</div>'
+            f'{_anom_items}</div>',
+            unsafe_allow_html=True,
+        )
+
     # Top 12 projects by total cost
     top_projects = (
         session_agg.groupby("project_name")["cost_usd"]
@@ -1253,13 +1404,14 @@ if has_usage and not df_filtered.empty:
         table_df["model_short"] = (
             table_df["model"].str.replace("claude-", "").str.replace("-", " ").str.title()
         )
+        table_df["flag"] = table_df["is_anomaly"].map({True: "🔴", False: ""})
         display_sess = table_df[[
-            "project_name", "date", "session_short", "model_short",
+            "flag", "project_name", "date", "session_short", "model_short",
             "total_tokens", "input_tokens", "output_tokens",
             "cache_tokens", "tool_calls", "cost_usd",
         ]].copy()
         display_sess.columns = [
-            "Project", "Date", "Session", "Model",
+            "⚠", "Project", "Date", "Session", "Model",
             "Total Tokens", "Input", "Output",
             "Cache Create", "Tool Calls", "Cost (USD)",
         ]
@@ -1278,6 +1430,7 @@ if has_usage and not df_filtered.empty:
             use_container_width=True,
             height=360,
             column_config={
+                "⚠":            st.column_config.TextColumn(width="small"),
                 "Project":      st.column_config.TextColumn(width="medium"),
                 "Session":      st.column_config.TextColumn(width="small"),
                 "Model":        st.column_config.TextColumn(width="small"),
@@ -1289,7 +1442,11 @@ if has_usage and not df_filtered.empty:
                 "Cost (USD)":   st.column_config.NumberColumn(format="$%.4f"),
             },
         )
-        st.caption(f"{len(session_agg):,} total sessions · sorted by cost descending")
+        _anom_count = int(session_agg["is_anomaly"].sum())
+        st.caption(
+            f"{len(session_agg):,} total sessions · sorted by cost descending"
+            + (f" · 🔴 {_anom_count} anomalous session{'s' if _anom_count != 1 else ''}" if _anom_count else "")
+        )
 else:
     st.info("No session data available.")
 
