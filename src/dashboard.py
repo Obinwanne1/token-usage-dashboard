@@ -295,6 +295,47 @@ st.markdown(
         fill: #ffffff !important;
         stroke: #ffffff !important;
     }}
+
+    /* Download buttons — always green with white text */
+    [data-testid="stDownloadButton"] button,
+    [data-testid="stDownloadButton"] > button {{
+        background-color: {PRIMARY} !important;
+        color: #ffffff !important;
+        border: none !important;
+        border-radius: 6px !important;
+        font-weight: 600 !important;
+    }}
+    [data-testid="stDownloadButton"] button:hover {{
+        background-color: {ACCENT} !important;
+    }}
+
+    /* Radio button labels */
+    [data-testid="stRadio"] label,
+    [data-testid="stRadio"] p,
+    [data-testid="stRadio"] span,
+    .stRadio label, .stRadio p {{
+        color: {TEXT} !important;
+    }}
+
+    /* Number input labels */
+    [data-testid="stNumberInput"] label,
+    [data-testid="stNumberInput"] p {{
+        color: {TEXT} !important;
+    }}
+    [data-testid="stNumberInput"] input {{
+        background-color: {SURFACE} !important;
+        color: {TEXT} !important;
+        border-color: {BORDER} !important;
+    }}
+
+    /* st.dataframe — header text visible in dark mode */
+    [data-testid="stDataFrame"] th {{
+        background-color: {SURFACE} !important;
+        color: {TEXT} !important;
+    }}
+    [data-testid="stDataFrame"] td {{
+        color: {TEXT} !important;
+    }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -580,6 +621,72 @@ else:
     st.info("No usage data for selected filters.")
 
 # ---------------------------------------------------------------------------
+# Activity Heatmap — GitHub-style daily token calendar
+# ---------------------------------------------------------------------------
+
+st.markdown('<div class="section-header">Activity Heatmap</div>', unsafe_allow_html=True)
+
+if has_usage and "date" in df_filtered.columns and not df_filtered.empty:
+    _heat_daily = (
+        df_filtered.groupby("date")["total_tokens"]
+        .sum()
+        .reset_index()
+    )
+    _heat_daily["date"] = pd.to_datetime(_heat_daily["date"])
+    _heat_daily["dow"] = _heat_daily["date"].dt.dayofweek          # 0=Mon … 6=Sun
+    _heat_daily["week_idx"] = (
+        (_heat_daily["date"] - _heat_daily["date"].min()).dt.days // 7
+    )
+    _heat_daily["date_str"] = _heat_daily["date"].dt.strftime("%Y-%m-%d")
+
+    _n_weeks = int(_heat_daily["week_idx"].max()) + 1
+    _heat_z   = [[None] * _n_weeks for _ in range(7)]
+    _heat_txt = [[""] * _n_weeks for _ in range(7)]
+    for _, r in _heat_daily.iterrows():
+        d, w = int(r["dow"]), int(r["week_idx"])
+        _heat_z[d][w] = int(r["total_tokens"])
+        _heat_txt[d][w] = f"{r['date_str']}<br>{int(r['total_tokens']):,} tokens"
+
+    _day_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    fig_heat = go.Figure(go.Heatmap(
+        z=_heat_z,
+        text=_heat_txt,
+        hovertemplate="%{text}<extra></extra>",
+        x=list(range(_n_weeks)),
+        y=_day_labels,
+        colorscale=[
+            [0.0,  BG_SECONDARY],
+            [0.01, "#1a3d19"],
+            [0.25, "#2d6e28"],
+            [0.55, PRIMARY],
+            [0.80, ACCENT],
+            [1.0,  "#94c990"],
+        ],
+        showscale=True,
+        colorbar=dict(
+            title=dict(text="Tokens", font=dict(color=TEXT, size=11)),
+            tickfont=dict(color=TEXT, size=10),
+            thickness=12,
+        ),
+        xgap=3,
+        ygap=3,
+    ))
+    fig_heat.update_layout(
+        margin=dict(l=0, r=60, t=8, b=0),
+        height=170,
+        plot_bgcolor=BG,
+        paper_bgcolor=BG,
+        font=dict(family="Poppins", color=TEXT),
+        xaxis=dict(showticklabels=False, showgrid=False, zeroline=False),
+        yaxis=dict(color=TEXT, tickfont=dict(size=11), autorange="reversed",
+                   showgrid=False, zeroline=False),
+    )
+    st.plotly_chart(fig_heat, use_container_width=True,
+                    config={"displayModeBar": False})
+else:
+    st.info("No data for heatmap.")
+
+# ---------------------------------------------------------------------------
 # Project breakdown + Prompt type pie
 # ---------------------------------------------------------------------------
 
@@ -647,11 +754,15 @@ st.caption("Breakdown of every token consumer across your Claude Code sessions")
 
 if has_usage and has_history:
 
+    # Compute safe_total once — reused across all proportional cost calculations
+    _safe_total = df_filtered["total_tokens"].where(df_filtered["total_tokens"] != 0, 1)
+
     # 1. Prompts — input tokens from main (non-subagent) sessions
     main_df = df_filtered[df_filtered["source"] == "main"]
     prompt_tokens = int(main_df["input_tokens"].sum())
+    _main_safe_total = main_df["total_tokens"].where(main_df["total_tokens"] != 0, 1)
     prompt_cost = main_df["cost_usd"].sum() * (
-        main_df["input_tokens"].sum() / main_df["total_tokens"].replace(0, 1).sum()
+        main_df["input_tokens"].sum() / _main_safe_total.sum()
         if main_df["total_tokens"].sum() > 0 else 0
     )
 
@@ -665,9 +776,8 @@ if has_usage and has_history:
 
     # 3. CLAUDE.md context — cache_creation tokens (context window load per session)
     claude_md_tokens = int(df_filtered["cache_creation_tokens"].sum())
-    total_tok_sum = df_filtered["total_tokens"].sum()
     claude_md_cost = (
-        (df_filtered["cache_creation_tokens"] / df_filtered["total_tokens"].replace(0, 1))
+        (df_filtered["cache_creation_tokens"] / _safe_total)
         * df_filtered["cost_usd"]
     ).sum()
 
@@ -678,7 +788,8 @@ if has_usage and has_history:
     subagent_count = subagent_df["sessionId"].nunique()
 
     # 5. Pasted content — prompts with pastedContents
-    pasted_df = df_history[df_history.get("has_pasted", pd.Series(False, index=df_history.index))]
+    _has_pasted_col = "has_pasted" in df_history.columns
+    pasted_df = df_history[df_history["has_pasted"]] if _has_pasted_col else df_history.iloc[:0]
     pasted_prompt_count = len(pasted_df)
     pasted_chars = int(pasted_df["pasted_chars"].sum()) if "pasted_chars" in pasted_df.columns else 0
     # Rough token estimate: ~4 chars per token
@@ -692,14 +803,14 @@ if has_usage and has_history:
     # 7. Context carryover — cache_read tokens (context re-fed each turn)
     cache_read_tokens = int(df_filtered["cache_read_tokens"].sum())
     cache_read_cost = (
-        (df_filtered["cache_read_tokens"] / df_filtered["total_tokens"].replace(0, 1))
+        (df_filtered["cache_read_tokens"] / _safe_total)
         * df_filtered["cost_usd"]
     ).sum()
 
     # 8. Output / code written
     output_tokens = int(df_filtered["output_tokens"].sum())
     output_cost = (
-        (df_filtered["output_tokens"] / df_filtered["total_tokens"].replace(0, 1))
+        (df_filtered["output_tokens"] / _safe_total)
         * df_filtered["cost_usd"]
     ).sum()
 
@@ -781,21 +892,22 @@ else:
 # ---------------------------------------------------------------------------
 
 st.markdown('<div class="section-header">Usage Stats</div>', unsafe_allow_html=True)
-st.caption("Computed from local JSONL data · Set your own budgets below to track limits")
+st.caption("Computed from local JSONL data · Budgets auto-scaled from your historical peak usage")
 
 from datetime import date as _date, timedelta as _td
-import math as _math
 
 _today = _date.today()
 _week_start = _today - _td(days=_today.weekday())  # Monday
+_last_week_start = _week_start - _td(days=7)
 _next_monday = _week_start + _td(days=7)
+_yesterday = _today - _td(days=1)
 
 # All-time df (not filtered) for usage stats — we want real totals
 _all_usage = df_usage[df_usage["source"] == "main"].copy() if has_usage else pd.DataFrame()
 
 # Current session — most recent sessionId by timestamp
 _cur_session_tokens = 0
-_cur_session_cost = 0.0
+_cur_session_cost = 0
 _cur_session_id = "—"
 if has_usage and not _all_usage.empty and "timestamp" in _all_usage.columns:
     _latest_ts = _all_usage["timestamp"].max()
@@ -806,76 +918,158 @@ if has_usage and not _all_usage.empty and "timestamp" in _all_usage.columns:
         _cur_session_cost = _cur_sess_df["cost_usd"].sum()
         _cur_session_id = _cur_sid[:8]
 
-# This week
-_this_week_df = _all_usage[_all_usage["date"] >= _week_start] if has_usage and "date" in _all_usage.columns else pd.DataFrame()
-_week_tokens = int(_this_week_df["total_tokens"].sum()) if not _this_week_df.empty else 0
-_week_cost = _this_week_df["cost_usd"].sum() if not _this_week_df.empty else 0.0
+# This week vs last week
+_has_date = has_usage and "date" in _all_usage.columns and not _all_usage.empty
+_this_week_df  = _all_usage[_all_usage["date"] >= _week_start] if _has_date else pd.DataFrame()
+_last_week_df  = _all_usage[(_all_usage["date"] >= _last_week_start) & (_all_usage["date"] < _week_start)] if _has_date else pd.DataFrame()
+_week_tokens   = int(_this_week_df["total_tokens"].sum()) if not _this_week_df.empty else 0
+_week_cost     = _this_week_df["cost_usd"].sum() if not _this_week_df.empty else 0.0
+_lw_tokens     = int(_last_week_df["total_tokens"].sum()) if not _last_week_df.empty else 0
+_lw_cost       = _last_week_df["cost_usd"].sum() if not _last_week_df.empty else 0.0
 
-# Today
-_today_df = _all_usage[_all_usage["date"] == _today] if has_usage and "date" in _all_usage.columns else pd.DataFrame()
-_today_tokens = int(_today_df["total_tokens"].sum()) if not _today_df.empty else 0
-_today_cost = _today_df["cost_usd"].sum() if not _today_df.empty else 0.0
+# Today vs yesterday
+_today_df      = _all_usage[_all_usage["date"] == _today]     if _has_date else pd.DataFrame()
+_yesterday_df  = _all_usage[_all_usage["date"] == _yesterday] if _has_date else pd.DataFrame()
+_today_tokens  = int(_today_df["total_tokens"].sum())  if not _today_df.empty else 0
+_today_cost    = _today_df["cost_usd"].sum()           if not _today_df.empty else 0.0
+_yest_tokens   = int(_yesterday_df["total_tokens"].sum()) if not _yesterday_df.empty else 0
 
-# Budget inputs (persisted in session_state)
+# Data-driven default budgets — 2× historical max so scale makes sense
+# Only seed defaults once; user overrides persist in session_state
+if has_usage and not _all_usage.empty and _has_date:
+    _hist_sess_max   = int(_all_usage.groupby("sessionId")["total_tokens"].sum().max())
+    _hist_daily_max  = int(_all_usage.groupby("date")["total_tokens"].sum().max())
+    _hist_weekly_max = int(
+        _all_usage.set_index("timestamp")
+        .resample("W")["total_tokens"].sum().max()
+    )
+else:
+    _hist_sess_max, _hist_daily_max, _hist_weekly_max = 200_000, 1_000_000, 5_000_000
+
+_def_sess_budget   = max(_hist_sess_max * 2,   1_000_000)
+_def_daily_budget  = max(_hist_daily_max * 2,  2_000_000)
+_def_weekly_budget = max(_hist_weekly_max * 2, 50_000_000)
+
+# Seed session_state defaults only on first load
+if "session_token_budget" not in st.session_state:
+    st.session_state["session_token_budget"] = _def_sess_budget
+if "weekly_token_budget" not in st.session_state:
+    st.session_state["weekly_token_budget"] = _def_weekly_budget
+if "daily_token_budget" not in st.session_state:
+    st.session_state["daily_token_budget"] = _def_daily_budget
+
+# Budget inputs
 with st.expander("⚙️ Set Usage Budgets", expanded=False):
     _b1, _b2, _b3 = st.columns(3)
     with _b1:
         session_token_budget = st.number_input(
-            "Session token budget", min_value=1000, max_value=2_000_000,
-            value=int(st.session_state.get("session_token_budget", 200_000)),
-            step=10_000, format="%d", key="session_token_budget",
-            help="Max tokens per session (claude-sonnet context window = 200K)"
+            "Session token budget", min_value=1_000, max_value=2_000_000_000,
+            value=int(st.session_state["session_token_budget"]),
+            step=max(1_000, _hist_sess_max // 20), format="%d",
+            key="session_token_budget",
+            help="Tokens per session. Auto-seeded to 2× your historical session peak."
         )
     with _b2:
         weekly_token_budget = st.number_input(
-            "Weekly token budget", min_value=100_000, max_value=500_000_000,
-            value=int(st.session_state.get("weekly_token_budget", 5_000_000)),
-            step=500_000, format="%d", key="weekly_token_budget",
+            "Weekly token budget", min_value=100_000, max_value=10_000_000_000,
+            value=int(st.session_state["weekly_token_budget"]),
+            step=max(100_000, _hist_weekly_max // 20), format="%d",
+            key="weekly_token_budget",
         )
     with _b3:
         daily_token_budget = st.number_input(
-            "Daily token budget", min_value=10_000, max_value=50_000_000,
-            value=int(st.session_state.get("daily_token_budget", 1_000_000)),
-            step=100_000, format="%d", key="daily_token_budget",
+            "Daily token budget", min_value=10_000, max_value=2_000_000_000,
+            value=int(st.session_state["daily_token_budget"]),
+            step=max(10_000, _hist_daily_max // 20), format="%d",
+            key="daily_token_budget",
         )
 
-def _pbar(used: int, total: int, label: str, sublabel: str) -> str:
+def _usage_row(used: int, total: int, label: str, reset_line: str, delta_tokens: int = 0) -> str:
+    """Full-width usage bar matching the Claude Code /usage dialog style."""
     pct = min(used / total * 100, 100) if total > 0 else 0
-    color = "#dc2626" if pct >= 90 else "#f59e0b" if pct >= 70 else PRIMARY
+    bar_color = "#dc2626" if pct >= 90 else "#f59e0b" if pct >= 70 else PRIMARY
+    if delta_tokens > 0:
+        delta_pct = (used - delta_tokens) / delta_tokens * 100
+        arrow = "▲" if delta_pct > 0 else "▼"
+        d_color = "#dc2626" if delta_pct > 15 else "#f59e0b" if delta_pct > 0 else "#16A34A"
+        delta_badge = (
+            f'<span style="background:{d_color}22;color:{d_color};font-size:0.7rem;'
+            f'padding:1px 6px;border-radius:4px;margin-left:8px;">'
+            f'{arrow} {abs(delta_pct):.0f}% vs prior</span>'
+        )
+    else:
+        delta_badge = ""
     return f"""
-    <div style="margin-bottom:16px;">
-      <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
-        <span style="font-weight:600;color:{TEXT};font-size:0.85rem;">{label}</span>
-        <span style="color:{TEXT_MUTED};font-size:0.8rem;">{pct:.1f}% used</span>
+    <div style="background:{SURFACE};border:1px solid {BORDER};border-radius:8px;
+                padding:16px 20px;margin-bottom:10px;">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px;">
+        <span style="font-weight:600;color:{TEXT};font-size:0.95rem;">{label}{delta_badge}</span>
+        <span style="color:{TEXT_MUTED};font-size:0.85rem;font-weight:500;">{pct:.0f}% used</span>
       </div>
-      <div style="background:{BORDER};border-radius:6px;height:10px;overflow:hidden;">
-        <div style="background:{color};width:{pct:.1f}%;height:100%;border-radius:6px;
-             transition:width 0.4s ease;"></div>
+      <div style="background:{BORDER};border-radius:4px;height:14px;overflow:hidden;">
+        <div style="background:{bar_color};width:{pct:.1f}%;height:100%;border-radius:4px;
+             transition:width 0.5s ease;"></div>
       </div>
-      <div style="color:{TEXT_MUTED};font-size:0.75rem;margin-top:3px;">{sublabel}</div>
+      <div style="color:{TEXT_MUTED};font-size:0.78rem;margin-top:8px;">
+        {used:,} / {total:,} tokens &nbsp;·&nbsp; {reset_line}
+      </div>
     </div>"""
 
-_u1, _u2, _u3 = st.columns(3)
-with _u1:
-    st.markdown(_pbar(
-        _cur_session_tokens, session_token_budget,
-        f"Current Session · {_cur_session_id}",
-        f"{_cur_session_tokens:,} / {session_token_budget:,} tokens · {format_cost(_cur_session_cost)}"
-    ), unsafe_allow_html=True)
-with _u2:
-    st.markdown(_pbar(
-        _week_tokens, weekly_token_budget,
-        "Current Week (all models)",
-        f"{_week_tokens:,} / {weekly_token_budget:,} tokens · {format_cost(_week_cost)} · resets {_next_monday.strftime('%b %d')}"
-    ), unsafe_allow_html=True)
-with _u3:
-    st.markdown(_pbar(
-        _today_tokens, daily_token_budget,
-        "Today",
-        f"{_today_tokens:,} / {daily_token_budget:,} tokens · {format_cost(_today_cost)}"
-    ), unsafe_allow_html=True)
+# Session start time
+_sess_start_str = "—"
+if has_usage and not _all_usage.empty and "timestamp" in _all_usage.columns:
+    _sess_start_ts = _all_usage[_all_usage["sessionId"] == (_cur_sid if _cur_session_id != "—" else "")]["timestamp"].min()
+    if pd.notna(_sess_start_ts):
+        _sess_start_str = pd.Timestamp(_sess_start_ts).strftime("%b %d, %H:%M UTC")
 
-st.caption("🔒 Exact Claude.ai rate-limit % requires a private API — set your own budgets above to track limits")
+st.markdown(
+    _usage_row(
+        _cur_session_tokens, session_token_budget,
+        f"Current session · {_cur_session_id} &nbsp;<span style='color:{TEXT_MUTED};font-size:0.78rem;font-weight:400;'>({format_cost(_cur_session_cost)})</span>",
+        f"Started {_sess_start_str} &nbsp;·&nbsp; budget: {session_token_budget:,} tokens",
+    ),
+    unsafe_allow_html=True,
+)
+st.markdown(
+    _usage_row(
+        _week_tokens, weekly_token_budget,
+        f"Current week (all models) &nbsp;<span style='color:{TEXT_MUTED};font-size:0.78rem;font-weight:400;'>({format_cost(_week_cost)})</span>",
+        f"Resets {_next_monday.strftime('%b %d')} &nbsp;·&nbsp; budget: {weekly_token_budget:,} tokens",
+        delta_tokens=_lw_tokens,
+    ),
+    unsafe_allow_html=True,
+)
+
+# Today — compact row below
+_today_pct = min(_today_tokens / daily_token_budget * 100, 100) if daily_token_budget > 0 else 0
+_today_bar_color = "#dc2626" if _today_pct >= 90 else "#f59e0b" if _today_pct >= 70 else ACCENT
+_yest_delta = ""
+if _yest_tokens > 0:
+    _td_pct = (_today_tokens - _yest_tokens) / _yest_tokens * 100
+    _td_arrow = "▲" if _td_pct > 0 else "▼"
+    _td_color = "#dc2626" if _td_pct > 15 else "#f59e0b" if _td_pct > 0 else "#16A34A"
+    _yest_delta = (
+        f'<span style="background:{_td_color}22;color:{_td_color};font-size:0.7rem;'
+        f'padding:1px 6px;border-radius:4px;margin-left:8px;">'
+        f'{_td_arrow} {abs(_td_pct):.0f}% vs yesterday</span>'
+    )
+st.markdown(
+    f'<div style="background:{SURFACE};border:1px solid {BORDER};border-radius:8px;'
+    f'padding:12px 20px;margin-bottom:10px;display:flex;align-items:center;gap:16px;">'
+    f'<div style="flex:0 0 auto;">'
+    f'<span style="font-weight:600;color:{TEXT};font-size:0.88rem;">Today{_yest_delta}</span>'
+    f'</div>'
+    f'<div style="flex:1;background:{BORDER};border-radius:4px;height:10px;overflow:hidden;">'
+    f'<div style="background:{_today_bar_color};width:{_today_pct:.1f}%;height:100%;border-radius:4px;transition:width 0.5s ease;"></div>'
+    f'</div>'
+    f'<div style="flex:0 0 auto;color:{TEXT_MUTED};font-size:0.8rem;">'
+    f'{_today_pct:.0f}% &nbsp;·&nbsp; {_today_tokens:,} tokens &nbsp;·&nbsp; {format_cost(_today_cost)}'
+    f'</div>'
+    f'</div>',
+    unsafe_allow_html=True,
+)
+
+st.caption("🔒 Percentages vs your budgets (above), not Anthropic rate limits — exact rate-limit % requires a private API")
 
 # ---------------------------------------------------------------------------
 # Session Cost Breakdown by Project
@@ -912,31 +1106,52 @@ if has_usage and not df_filtered.empty:
     )
     chart_df = session_agg[session_agg["project_name"].isin(top_projects)].copy()
 
-    # Stacked bar: one bar per project, each segment = one session
+    # Stacked bar: one bar per project, top-5 sessions shown individually,
+    # remainder aggregated into an "other" bucket — caps trace count to ~72
     fig_sess = go.Figure()
     colors = [
         "#407E3C","#5a9e56","#94c990","#c3ddbf","#2d6e28","#6BAF67",
         "#1a3d19","#d4edda","#163A17","#7DBF7E","#0A1F0A","#a8d5a2",
     ]
+    _TOP_N_SESSIONS = 5
     proj_session_map = chart_df.groupby("project_name")
     for i, proj in enumerate(top_projects):
         if proj not in proj_session_map.groups:
             continue
         proj_data = proj_session_map.get_group(proj).sort_values("cost_usd", ascending=False)
-        for _, row in proj_data.iterrows():
+        top_rows = proj_data.head(_TOP_N_SESSIONS)
+        rest = proj_data.iloc[_TOP_N_SESSIONS:]
+        color = colors[i % len(colors)]
+        for _, row in top_rows.iterrows():
             fig_sess.add_trace(go.Bar(
                 name=f"{proj} · {row['session_short']}",
                 y=[proj],
                 x=[row["cost_usd"]],
                 orientation="h",
-                marker_color=colors[i % len(colors)],
+                marker_color=color,
                 hovertemplate=(
                     f"<b>{proj}</b><br>"
                     f"Session: {row['sessionId'][:16]}…<br>"
                     f"Date: {row['date']}<br>"
-                    f"Tokens: {row['total_tokens']:,}<br>"
+                    f"Tokens: {int(row['total_tokens']):,}<br>"
                     f"Cost: ${row['cost_usd']:.4f}<br>"
                     f"Tool calls: {int(row['tool_calls'])}<extra></extra>"
+                ),
+                showlegend=False,
+            ))
+        if not rest.empty:
+            fig_sess.add_trace(go.Bar(
+                name=f"{proj} · other",
+                y=[proj],
+                x=[rest["cost_usd"].sum()],
+                orientation="h",
+                marker_color=color,
+                opacity=0.45,
+                hovertemplate=(
+                    f"<b>{proj}</b><br>"
+                    f"Other sessions: {len(rest)}<br>"
+                    f"Combined cost: ${rest['cost_usd'].sum():.4f}<br>"
+                    f"Combined tokens: {int(rest['total_tokens'].sum()):,}<extra></extra>"
                 ),
                 showlegend=False,
             ))
@@ -955,42 +1170,126 @@ if has_usage and not df_filtered.empty:
                     config={"displayModeBar": True, "displaylogo": False,
                             "modeBarButtonsToRemove": ["sendDataToCloud"]})
 
-    # Drilldown table
-    st.markdown(f"<p style='color:{TEXT_MUTED};font-size:0.8rem;margin:0 0 8px;'>Click column headers to sort · Hover bars for session detail</p>", unsafe_allow_html=True)
-
-    table_df = session_agg.copy()
-    table_df = table_df.sort_values("cost_usd", ascending=False)
-    table_df["cost_usd_fmt"] = table_df["cost_usd"].apply(format_cost)
-    table_df["model_short"] = table_df["model"].str.replace("claude-", "").str.replace("-", " ").str.title()
-
-    display_sess = table_df[[
-        "project_name", "date", "session_short", "model_short",
-        "total_tokens", "input_tokens", "output_tokens",
-        "cache_tokens", "tool_calls", "cost_usd",
-    ]].copy()
-    display_sess.columns = [
-        "Project", "Date", "Session", "Model",
-        "Total Tokens", "Input", "Output",
-        "Cache Create", "Tool Calls", "Cost (USD)",
-    ]
-
-    st.dataframe(
-        display_sess,
-        use_container_width=True,
-        height=360,
-        column_config={
-            "Project":      st.column_config.TextColumn(width="medium"),
-            "Session":      st.column_config.TextColumn(width="small"),
-            "Model":        st.column_config.TextColumn(width="small"),
-            "Total Tokens": st.column_config.NumberColumn(format="%d"),
-            "Input":        st.column_config.NumberColumn(format="%d"),
-            "Output":       st.column_config.NumberColumn(format="%d"),
-            "Cache Create": st.column_config.NumberColumn(format="%d"),
-            "Tool Calls":   st.column_config.NumberColumn(format="%d"),
-            "Cost (USD)":   st.column_config.NumberColumn(format="$%.4f"),
-        },
+    # View toggle — by session or grouped by project
+    _tbl_col, _dl_col = st.columns([3, 1])
+    with _tbl_col:
+        _breakdown_view = st.radio(
+            "Group by", ["Session", "Project"],
+            horizontal=True, key="breakdown_view",
+        )
+    st.markdown(
+        f"<p style='color:{TEXT_MUTED};font-size:0.8rem;margin:0 0 8px;'>"
+        "Click column headers to sort · Hover bars for session detail</p>",
+        unsafe_allow_html=True,
     )
-    st.caption(f"{len(session_agg):,} total sessions · sorted by cost descending")
+
+    if _breakdown_view == "Project":
+        # Aggregate session_agg by project
+        proj_grouped = (
+            session_agg.groupby("project_name")
+            .agg(
+                sessions=("sessionId", "nunique"),
+                total_tokens=("total_tokens", "sum"),
+                input_tokens=("input_tokens", "sum"),
+                output_tokens=("output_tokens", "sum"),
+                cache_tokens=("cache_tokens", "sum"),
+                tool_calls=("tool_calls", "sum"),
+                cost_usd=("cost_usd", "sum"),
+                first_date=("date", "min"),
+                last_date=("date", "max"),
+            )
+            .reset_index()
+            .sort_values("cost_usd", ascending=False)
+        )
+        proj_grouped["avg_cost_per_session"] = proj_grouped["cost_usd"] / proj_grouped["sessions"].clip(lower=1)
+        proj_grouped["output_ratio"] = (
+            proj_grouped["output_tokens"] / proj_grouped["input_tokens"].replace(0, 1)
+        ).round(2)
+
+        display_proj = proj_grouped[[
+            "project_name", "sessions", "first_date", "last_date",
+            "total_tokens", "output_ratio", "tool_calls",
+            "avg_cost_per_session", "cost_usd",
+        ]].copy()
+        display_proj.columns = [
+            "Project", "Sessions", "First Used", "Last Used",
+            "Total Tokens", "Output/Input Ratio", "Tool Calls",
+            "Avg Cost/Session", "Total Cost (USD)",
+        ]
+
+        with _dl_col:
+            st.download_button(
+                "⬇ Export CSV",
+                data=display_proj.to_csv(index=False).encode("utf-8"),
+                file_name="project_cost_breakdown.csv",
+                mime="text/csv",
+                key="dl_proj",
+            )
+
+        st.dataframe(
+            display_proj,
+            use_container_width=True,
+            height=380,
+            column_config={
+                "Project":            st.column_config.TextColumn(width="medium"),
+                "Sessions":           st.column_config.NumberColumn(format="%d"),
+                "Total Tokens":       st.column_config.NumberColumn(format="%d"),
+                "Tool Calls":         st.column_config.NumberColumn(format="%d"),
+                "Output/Input Ratio": st.column_config.NumberColumn(format="%.2f",
+                                        help="Output tokens ÷ input tokens — higher = more verbose responses"),
+                "Avg Cost/Session":   st.column_config.NumberColumn(format="$%.4f"),
+                "Total Cost (USD)":   st.column_config.NumberColumn(format="$%.4f"),
+            },
+        )
+        st.caption(
+            f"{len(proj_grouped):,} projects · "
+            f"most expensive: {proj_grouped.iloc[0]['project_name']} "
+            f"({format_cost(proj_grouped.iloc[0]['cost_usd'])})"
+        )
+
+    else:
+        # Original per-session table
+        table_df = session_agg.sort_values("cost_usd", ascending=False).copy()
+        table_df["model_short"] = (
+            table_df["model"].str.replace("claude-", "").str.replace("-", " ").str.title()
+        )
+        display_sess = table_df[[
+            "project_name", "date", "session_short", "model_short",
+            "total_tokens", "input_tokens", "output_tokens",
+            "cache_tokens", "tool_calls", "cost_usd",
+        ]].copy()
+        display_sess.columns = [
+            "Project", "Date", "Session", "Model",
+            "Total Tokens", "Input", "Output",
+            "Cache Create", "Tool Calls", "Cost (USD)",
+        ]
+
+        with _dl_col:
+            st.download_button(
+                "⬇ Export CSV",
+                data=display_sess.to_csv(index=False).encode("utf-8"),
+                file_name="session_cost_breakdown.csv",
+                mime="text/csv",
+                key="dl_sess",
+            )
+
+        st.dataframe(
+            display_sess,
+            use_container_width=True,
+            height=360,
+            column_config={
+                "Project":      st.column_config.TextColumn(width="medium"),
+                "Session":      st.column_config.TextColumn(width="small"),
+                "Model":        st.column_config.TextColumn(width="small"),
+                "Total Tokens": st.column_config.NumberColumn(format="%d"),
+                "Input":        st.column_config.NumberColumn(format="%d"),
+                "Output":       st.column_config.NumberColumn(format="%d"),
+                "Cache Create": st.column_config.NumberColumn(format="%d"),
+                "Tool Calls":   st.column_config.NumberColumn(format="%d"),
+                "Cost (USD)":   st.column_config.NumberColumn(format="$%.4f"),
+            },
+        )
+        st.caption(f"{len(session_agg):,} total sessions · sorted by cost descending")
 else:
     st.info("No session data available.")
 
@@ -998,7 +1297,9 @@ else:
 # Prompt Log Table
 # ---------------------------------------------------------------------------
 
-st.markdown('<div class="section-header">Prompt Log</div>', unsafe_allow_html=True)
+_pl_hdr, _pl_dl = st.columns([4, 1])
+with _pl_hdr:
+    st.markdown('<div class="section-header">Prompt Log</div>', unsafe_allow_html=True)
 
 search_query = st.text_input(
     "Search prompts", placeholder="Type to filter...", key="prompt_search"
@@ -1032,13 +1333,12 @@ if has_history and not df_hist_filtered.empty:
         log_df["prompt_preview"] = "[hidden — teaching mode]"
         log_df["project"] = "[hidden — teaching mode]"
     else:
-        log_df["prompt_preview"] = log_df["display"].str[:80] + log_df["display"].apply(
-            lambda x: "…" if len(str(x)) > 80 else ""
-        )
+        _truncated = log_df["display"].str.len() > 80
+        log_df["prompt_preview"] = log_df["display"].str[:80] + _truncated.map({True: "…", False: ""})
 
     # Pasted indicator
     if "has_pasted" in log_df.columns:
-        log_df["pasted"] = log_df["has_pasted"].apply(lambda x: "📋" if x else "")
+        log_df["pasted"] = log_df["has_pasted"].map({True: "📋", False: ""})
     else:
         log_df["pasted"] = ""
 
@@ -1055,6 +1355,20 @@ if has_history and not df_hist_filtered.empty:
         lambda x: format_cost(x) if pd.notna(x) else "—"
     )
     display_df = display_df.sort_values("Timestamp", ascending=False)
+
+    with _pl_dl:
+        st.markdown("<br>", unsafe_allow_html=True)
+        _export_df = display_df.copy()
+        if teaching_toggle:
+            _export_df["Prompt"] = "[hidden]"
+            _export_df["Project"] = "[hidden]"
+        st.download_button(
+            "⬇ Export CSV",
+            data=_export_df.to_csv(index=False).encode("utf-8"),
+            file_name="prompt_log.csv",
+            mime="text/csv",
+            key="dl_prompts",
+        )
 
     st.dataframe(
         display_df,

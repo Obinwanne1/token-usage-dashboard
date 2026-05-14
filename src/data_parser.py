@@ -215,10 +215,6 @@ def _parse_session_jsonl(
 
                 model = message.get("model", "unknown")
                 ts_raw = entry.get("timestamp", "")
-                try:
-                    dt = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
-                except Exception:
-                    dt = None
 
                 content = message.get("content", [])
                 tool_use_count = sum(
@@ -235,7 +231,7 @@ def _parse_session_jsonl(
                 cost = calculate_cost(usage, model)
 
                 results.append({
-                    "timestamp": dt,
+                    "timestamp": ts_raw,
                     "sessionId": session_id,
                     "project_name": project_name,
                     "model": model,
@@ -257,10 +253,6 @@ def _parse_session_jsonl(
                     for block in content:
                         if isinstance(block, dict) and block.get("type") == "tool_result":
                             ts_raw = entry.get("timestamp", "")
-                            try:
-                                dt = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
-                            except Exception:
-                                dt = None
                             result_content = block.get("content", "")
                             result_chars = (
                                 len(result_content)
@@ -272,7 +264,7 @@ def _parse_session_jsonl(
                                 )
                             )
                             results.append({
-                                "timestamp": dt,
+                                "timestamp": ts_raw,
                                 "sessionId": session_id,
                                 "project_name": project_name,
                                 "model": "tool_result",
@@ -359,6 +351,16 @@ def _get_watched_files() -> list[Path]:
     sessions_dir = base / "sessions"
     if sessions_dir.exists():
         files.extend(sessions_dir.glob("*.json"))
+    # Watch project subdirectory mtimes so cache invalidates when JSONL data changes.
+    # Stat-ing each subdir is cheap; reading 208MB of JSONL is not.
+    projects_dir = base / "projects"
+    if projects_dir.exists():
+        for project_folder in projects_dir.iterdir():
+            if project_folder.is_dir():
+                files.append(project_folder)
+                for session_dir in project_folder.iterdir():
+                    if session_dir.is_dir():
+                        files.append(session_dir)
     return files
 
 
