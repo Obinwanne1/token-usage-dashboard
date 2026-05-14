@@ -409,6 +409,56 @@ with st.expander("☰  Filters & Display", expanded=False):
         else:
             date_range = None
 
+    st.markdown("---")
+    _a1, _a2 = st.columns([1, 3])
+    with _a1:
+        daily_threshold = st.number_input(
+            "Daily cost alert threshold (USD)",
+            min_value=0.01, max_value=500.0,
+            value=float(st.session_state.get("daily_threshold", 5.0)),
+            step=0.50, format="%.2f",
+            key="daily_threshold",
+            help="Show a warning banner when today's spend exceeds this amount",
+        )
+
+# ---------------------------------------------------------------------------
+# Daily cost alert banner
+# ---------------------------------------------------------------------------
+
+if has_usage and "date" in df_filtered.columns:
+    from datetime import date as _date
+    _today = _date.today()
+    _today_df = df_filtered[df_filtered["date"] == _today]
+    _today_cost = _today_df["cost_usd"].sum()
+    _today_tokens = int(_today_df["total_tokens"].sum())
+    _threshold = st.session_state.get("daily_threshold", 5.0)
+
+    if _today_cost > 0:
+        if _today_cost >= _threshold:
+            st.markdown(
+                f"""<div style="background:#7f1d1d;border:1px solid #dc2626;border-left:6px solid #dc2626;
+                border-radius:8px;padding:14px 18px;margin-bottom:12px;color:#fef2f2;">
+                <strong>⚠️ Daily Cost Alert</strong> — Today's spend is
+                <strong>{format_cost(_today_cost)}</strong>
+                ({_today_tokens:,} tokens), exceeding your
+                <strong>{format_cost(_threshold)}</strong> threshold.
+                </div>""",
+                unsafe_allow_html=True,
+            )
+        else:
+            _pct = (_today_cost / _threshold) * 100
+            st.markdown(
+                f"""<div style="background:{'#163A17' if dark else '#f0f7ee'};
+                border:1px solid {'#2D5C2E' if dark else '#c3ddbf'};
+                border-left:6px solid {PRIMARY};
+                border-radius:8px;padding:14px 18px;margin-bottom:12px;color:{TEXT};">
+                <strong>✓ Today's spend:</strong> {format_cost(_today_cost)}
+                ({_today_tokens:,} tokens) &nbsp;·&nbsp;
+                {_pct:.0f}% of {format_cost(_threshold)} daily limit
+                </div>""",
+                unsafe_allow_html=True,
+            )
+
 st.markdown("<br>", unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
