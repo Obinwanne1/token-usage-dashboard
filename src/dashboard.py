@@ -610,7 +610,8 @@ with _sf_col:
             _eow_cost = sum(_proj(d) for d in range(_days_to_sunday + 1))
             _eom_cost = sum(_proj(d) for d in range(_days_to_month_end + 1))
             _avg_daily = float(_y.mean())
-            _trend_icon = "📈" if _slope > 0.01 else "📉" if _slope < -0.01 else "➡️"
+            _trend_icon = "↑" if _slope > 0.01 else "↓" if _slope < -0.01 else "→"
+            _trend_color = "#dc2626" if _slope > 0.01 else "#16A34A" if _slope < -0.01 else TEXT_MUTED
 
             st.markdown(
                 f"""<div style="background:{SURFACE};border:1px solid {BORDER};
@@ -630,7 +631,7 @@ with _sf_col:
                   </div>
                   <div>
                     <div style="color:{TEXT_MUTED};font-size:0.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.05em;">Trend</div>
-                    <div style="color:{TEXT};font-size:1.2rem;font-weight:700;">{_trend_icon} {"+" if _slope > 0 else ""}{format_cost(_slope)}/day</div>
+                    <div style="color:{_trend_color};font-size:1.2rem;font-weight:700;">{_trend_icon} {"+" if _slope > 0 else ""}{format_cost(_slope)}/day</div>
                   </div>
                 </div>
                 <div style="color:{TEXT_MUTED};font-size:0.72rem;margin-top:8px;">
